@@ -13,9 +13,6 @@
  */
 package com.myyearbook.hudson.plugins.confluence;
 
-import com.myyearbook.hudson.plugins.confluence.wiki.editors.MarkupEditor;
-import com.myyearbook.hudson.plugins.confluence.wiki.editors.MarkupEditor.TokenNotFoundException;
-
 import hudson.EnvVars;
 import hudson.Extension;
 import hudson.FilePath;
@@ -34,6 +31,19 @@ import hudson.tasks.Publisher;
 import hudson.util.DescribableList;
 import hudson.util.FormValidation;
 
+import java.io.File;
+import java.io.IOException;
+import java.net.URLConnection;
+import java.rmi.RemoteException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+import jenkins.plugins.confluence.soap.v1.RemoteAttachment;
+import jenkins.plugins.confluence.soap.v1.RemotePage;
+import jenkins.plugins.confluence.soap.v1.RemotePageSummary;
+import jenkins.plugins.confluence.soap.v1.RemotePageUpdateOptions;
+import jenkins.plugins.confluence.soap.v1.RemoteSpace;
 import net.sf.json.JSONObject;
 
 import org.apache.commons.lang.StringUtils;
@@ -42,18 +52,8 @@ import org.kohsuke.stapler.QueryParameter;
 import org.kohsuke.stapler.StaplerRequest;
 import org.kohsuke.stapler.export.Exported;
 
-import java.io.File;
-import java.io.IOException;
-import java.net.URLConnection;
-import java.rmi.RemoteException;
-import java.util.ArrayList;
-import java.util.List;
-
-import jenkins.plugins.confluence.soap.v1.RemoteAttachment;
-import jenkins.plugins.confluence.soap.v1.RemotePage;
-import jenkins.plugins.confluence.soap.v1.RemotePageSummary;
-import jenkins.plugins.confluence.soap.v1.RemotePageUpdateOptions;
-import jenkins.plugins.confluence.soap.v1.RemoteSpace;
+import com.myyearbook.hudson.plugins.confluence.wiki.editors.MarkupEditor;
+import com.myyearbook.hudson.plugins.confluence.wiki.editors.MarkupEditor.TokenNotFoundException;
 
 public class ConfluencePublisher extends Notifier implements Saveable {
     private static final String DEFAULT_CONTENT_TYPE = "application/octet-stream";
@@ -62,6 +62,7 @@ public class ConfluencePublisher extends Notifier implements Saveable {
     private final boolean attachArchivedArtifacts;
     private final boolean buildIfUnstable;
     private final String fileSet;
+    private final boolean replaceAttachments;
 
     private final String spaceName;
     private final String pageName;
@@ -72,7 +73,7 @@ public class ConfluencePublisher extends Notifier implements Saveable {
     @DataBoundConstructor
     public ConfluencePublisher(String siteName, final boolean buildIfUnstable,
             final String spaceName, final String pageName, final boolean attachArchivedArtifacts,
-            final String fileSet, final List<MarkupEditor> editorList) throws IOException {
+            final String fileSet, final List<MarkupEditor> editorList, final boolean replaceAttachments) throws IOException {
 
         if (siteName == null) {
             List<ConfluenceSite> sites = getDescriptor().getSites();
@@ -88,6 +89,7 @@ public class ConfluencePublisher extends Notifier implements Saveable {
         this.buildIfUnstable = buildIfUnstable;
         this.attachArchivedArtifacts = attachArchivedArtifacts;
         this.fileSet = fileSet;
+        this.replaceAttachments = replaceAttachments;
 
         if (editorList != null) {
             this.editors.addAll(editorList);
@@ -158,17 +160,17 @@ public class ConfluencePublisher extends Notifier implements Saveable {
         return spaceName;
     }
 
-    protected boolean performAttachments(AbstractBuild<?, ?> build, Launcher launcher,
+    protected List<RemoteAttachment> performAttachments(AbstractBuild<?, ?> build, Launcher launcher,
             BuildListener listener, ConfluenceSession confluence,
             final RemotePageSummary pageData) throws IOException, InterruptedException {
 
         final long pageId = pageData.getId();
         FilePath ws = build.getWorkspace();
-
+        final List<RemoteAttachment> remoteAttachments = new ArrayList<RemoteAttachment>(); 
         if (ws == null) {
             // Possibly running on a slave that went down
             log(listener, "Workspace is unavailable.");
-            return false;
+            return remoteAttachments;
         }
 
         String attachmentComment = build.getEnvironment(listener).expand(
@@ -225,9 +227,26 @@ public class ConfluencePublisher extends Notifier implements Saveable {
         }
 
         log(listener, "Uploading " + files.size() + " file(s) to Confluence...");
-
+        List<RemoteAttachment> existingAtachments = new ArrayList<RemoteAttachment>(Arrays.asList(confluence.getAttachments(pageId)));
         for (FilePath file : files) {
             final String fileName = file.getName();
+
+            if(shouldReplaceAttachments()){
+		for (RemoteAttachment remoteAttachment : existingAtachments) {
+			if(remoteAttachment.getFileName().equals(fileName)){
+				try{
+					confluence.removeAttachment(pageId, remoteAttachment);
+					existingAtachments.remove(remoteAttachment);
+				log(listener, "Deleted existing " + remoteAttachment.getFileName() + " from Confluence before upload new...");
+					break;
+				}catch (RemoteException e) {
+					log(listener, "Deleting error: " + e.toString());
+					throw e;
+				}
+			}
+				}
+            }
+
             String contentType = URLConnection.guessContentTypeFromName(fileName);
 
             if (StringUtils.isEmpty(contentType)) {
@@ -240,6 +259,7 @@ public class ConfluencePublisher extends Notifier implements Saveable {
             try {
                 final RemoteAttachment result = confluence.addAttachment(pageId, file,
                         contentType, attachmentComment);
+                remoteAttachments.add(result);
                 log(listener, "   done: " + result.getUrl());
             } catch (IOException ioe) {
                 listener.error("Unable to upload file...");
@@ -251,7 +271,7 @@ public class ConfluencePublisher extends Notifier implements Saveable {
         }
         log(listener, "Done");
 
-        return true;
+        return remoteAttachments;
     }
 
     @Override
@@ -310,8 +330,9 @@ public class ConfluencePublisher extends Notifier implements Saveable {
         }
 
         // Perform attachment uploads
+        List<RemoteAttachment> remoteAttachments = null;
         try {
-            result &= this.performAttachments(build, launcher, listener, confluence, pageData);
+            remoteAttachments = this.performAttachments(build, launcher, listener, confluence, pageData);
         } catch (IOException e) {
             e.printStackTrace(listener.getLogger());
         } catch (InterruptedException e) {
@@ -324,7 +345,7 @@ public class ConfluencePublisher extends Notifier implements Saveable {
                 // Perform wiki replacements
                 try {
                     result &= this.performWikiReplacements(build, launcher, listener, confluence,
-                            (RemotePage) pageData);
+                            (RemotePage) pageData, remoteAttachments);
                 } catch (IOException e) {
                     e.printStackTrace(listener.getLogger());
                 } catch (InterruptedException e) {
@@ -339,7 +360,7 @@ public class ConfluencePublisher extends Notifier implements Saveable {
 
                 try {
                     result &= this.performWikiReplacements(build, launcher, listener, confluence,
-                            pageDataV2);
+                            pageDataV2, remoteAttachments);
                 } catch (IOException e) {
                     e.printStackTrace(listener.getLogger());
                 } catch (InterruptedException e) {
@@ -373,7 +394,7 @@ public class ConfluencePublisher extends Notifier implements Saveable {
 
     private boolean performWikiReplacements(AbstractBuild<?, ?> build, Launcher launcher,
             BuildListener listener, ConfluenceSession confluence,
-            jenkins.plugins.confluence.soap.v2.RemotePage pageDataV2) throws IOException,
+            jenkins.plugins.confluence.soap.v2.RemotePage pageDataV2, List<RemoteAttachment> remoteAttachments) throws IOException,
             InterruptedException {
 
         final String editComment = build.getEnvironment(listener).expand(
@@ -382,7 +403,7 @@ public class ConfluencePublisher extends Notifier implements Saveable {
                 false, editComment);
 
         // Get current content
-        String content = performEdits(build, listener, pageDataV2.getContent(), true);
+        String content = performEdits(build, listener, pageDataV2.getContent(), true, remoteAttachments);
 
         // Now set the replacement content
         pageDataV2.setContent(content);
@@ -391,17 +412,19 @@ public class ConfluencePublisher extends Notifier implements Saveable {
     }
 
     /**
+     *
      * @param build
      * @param launcher
      * @param listener
      * @param confluence
      * @param pageData
+     * @param remoteAttachments
      * @return
-     * @throws InterruptedException
      * @throws IOException
+     * @throws InterruptedException
      */
     protected boolean performWikiReplacements(AbstractBuild<?, ?> build, Launcher launcher,
-            BuildListener listener, ConfluenceSession confluence, RemotePage pageData)
+            BuildListener listener, ConfluenceSession confluence, RemotePage pageData, List<RemoteAttachment> remoteAttachments)
             throws IOException, InterruptedException {
 
         final String editComment = build.getEnvironment(listener).expand(
@@ -409,7 +432,7 @@ public class ConfluencePublisher extends Notifier implements Saveable {
         final RemotePageUpdateOptions options = new RemotePageUpdateOptions(false, editComment);
 
         // Get current content
-        String content = performEdits(build, listener, pageData.getContent(), false);
+        String content = performEdits(build, listener, pageData.getContent(), false, remoteAttachments);
 
         // Now set the replacement content
         pageData.setContent(content);
@@ -418,12 +441,12 @@ public class ConfluencePublisher extends Notifier implements Saveable {
     }
 
     private String performEdits(final AbstractBuild<?, ?> build, final BuildListener listener,
-            String content, final boolean isNewFormat) {
+            String content, final boolean isNewFormat, List<RemoteAttachment> remoteAttachments) {
         for (MarkupEditor editor : this.editors) {
             log(listener, "Performing wiki edits: " + editor.getDescriptor().getDisplayName());
 
             try {
-                content = editor.performReplacement(build, listener, content, isNewFormat);
+                content = editor.performReplacement(build, listener, content, isNewFormat, remoteAttachments);
             } catch (TokenNotFoundException e) {
                 log(listener, "ERROR while performing replacement: " + e.getMessage());
             }
@@ -476,6 +499,12 @@ public class ConfluencePublisher extends Notifier implements Saveable {
      */
     public boolean shouldBuildIfUnstable() {
         return buildIfUnstable;
+    }
+    /**
+     * @return the buildIfUnstable
+     */
+    public boolean shouldReplaceAttachments() {
+        return replaceAttachments;
     }
 
     public void save() throws IOException {

@@ -1,0 +1,23 @@
+diff a/src/main/java/com/myyearbook/hudson/plugins/confluence/ConfluencePublisher.java b/src/main/java/com/myyearbook/hudson/plugins/confluence/ConfluencePublisher.java	(rejected hunks)
+@@ -145,18 +151,18 @@ public class ConfluencePublisher extends Notifier implements Saveable {
+         return spaceName;
+     }
+ 
+-    protected boolean
++    protected List<RemoteAttachment>
+             performAttachments(AbstractBuild<?, ?> build, Launcher launcher,
+                     BuildListener listener, ConfluenceSession confluence,
+                     final RemotePageSummary pageData) throws IOException, InterruptedException {
+ 
+         final long pageId = pageData.getId();
+         FilePath ws = build.getWorkspace();
+-
++        final List<RemoteAttachment> remoteAttachments = new ArrayList<RemoteAttachment>(); 
+         if (ws == null) {
+             // Possibly running on a slave that went down
+             log(listener, "Workspace is unavailable.");
+-            return false;
++            return remoteAttachments;
+         }
+ 
+         String attachmentComment = build.getEnvironment(listener).expand(

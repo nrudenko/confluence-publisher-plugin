@@ -1,0 +1,11 @@
+diff a/src/main/java/com/myyearbook/hudson/plugins/confluence/wiki/generators/FileGenerator.java b/src/main/java/com/myyearbook/hudson/plugins/confluence/wiki/generators/FileGenerator.java	(rejected hunks)
+@@ -12,6 +12,9 @@ import org.kohsuke.stapler.DataBoundConstructor;
+ import org.kohsuke.stapler.export.Exported;
+ 
+ import java.io.IOException;
++import java.util.List;
++
++import jenkins.plugins.confluence.soap.v1.RemoteAttachment;
+ 
+ /**
+  * Content generator that reads the markup from a configured workspace file.
